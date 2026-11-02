@@ -1,0 +1,14 @@
+[package]
+name = "soroban-xdr-proof-kit"
+version = "0.2.0"
+edition = "2021"
+authors = ["Khoa Phan <khoap1220-hue@users.noreply.github.com>"]
+description = "Lightweight Rust & WebAssembly toolkit for Stellar LedgerHeader XDR framing validation, SHA-256 cryptographic ancestry proofs, and Soroban checkpoint range calculation."
+license = "MIT"
+repository = "https://github.com/khoap1220-hue/soroban-xdr-proof-kit"
+keywords = ["stellar", "soroban", "xdr", "webassembly", "cryptography"]
+categories = ["cryptography::cryptocurrencies", "wasm", "no-std"]
+
+[features]
+default = []
+wasm = []
