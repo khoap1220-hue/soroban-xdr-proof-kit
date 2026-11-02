@@ -209,3 +209,14 @@ fn test_signed_stellar_value_and_ledger_header_ext_v1_and_u32_max_checkpoint() {
     // Overflow-safe checkpoint math at u32::MAX
     assert_eq!(checkpoint_for_ledger(u32::MAX), u32::MAX);
 }
+
+#[test]
+fn test_merkle_inclusion_branch() {
+    let leaf = soroban_xdr_proof_kit::sha256_digest(b"soroban-contract-storage-leaf-01");
+    let sib1 = soroban_xdr_proof_kit::sha256_digest(b"sibling-node-01");
+    let mut combined = [0u8; 64];
+    combined[..32].copy_from_slice(&leaf);
+    combined[32..].copy_from_slice(&sib1);
+    let root = soroban_xdr_proof_kit::sha256_digest(&combined);
+    assert!(soroban_xdr_proof_kit::verify_merkle_branch(&leaf, &[(sib1, true)], &root));
+}
