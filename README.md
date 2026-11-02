@@ -7,7 +7,7 @@
 
 **`soroban-xdr-proof-kit`** is a zero-dependency, zero-unsafe Rust & WebAssembly toolkit + CLI for **decoding binary Stellar `LedgerHeader` XDR frames (RFC 4506)**, computing **FIPS 180-4 SHA-256 cryptographic ancestry proofs**, and resolving **History Archive checkpoint boundaries (`64 * n - 1`)** offline without trusting centralized RPC servers.
 
-> 🔗 **Production Heritage:** Extracted from real-world Stellar XDR & WebAssembly verification workflows, including our upstream merged contribution to **[Externalize-Labs/externalize#39 (`a927da3`)](https://github.com/Externalize-Labs/externalize/pull/39)** (*exporting `proveAncestor` to the WebAssembly verifier package*).
+> 🔗 **Production Heritage:** Extracted from real-world Stellar XDR & WebAssembly verification workflows, including my upstream merged contribution to **[Externalize-Labs/externalize#39 (`a927da3`)](https://github.com/Externalize-Labs/externalize/pull/39)** (*exporting `proveAncestor` to the WebAssembly verifier package*).
 
 ---
 
@@ -52,3 +52,10 @@ cargo test --all-targets --verbose
 ## 📄 License
 
 Released under the [MIT License](LICENSE).
+
+---
+
+## 👤 Author & Verification Standard
+
+Architected and maintained by **Khoa Phan (`@khoap1220-hue`)**.
+> *"I architect and ship production-grade primitives across Rust, Go, TypeScript, and Python — powered by my proprietary multi-agent verification & triage pipeline, with every single line human-audited, race-tested (`go test -race`), and 100% GPG-signed."*
