@@ -209,3 +209,37 @@ fn test_signed_stellar_value_and_ledger_header_ext_v1_and_u32_max_checkpoint() {
     // Overflow-safe checkpoint math at u32::MAX
     assert_eq!(checkpoint_for_ledger(u32::MAX), u32::MAX);
 }
+
+#[test]
+fn test_cli_json_mode_and_exit_codes() {
+    use std::process::Command;
+
+    // 1. cargo run --bin soroban-xdr-proof -- --json
+    let output = Command::new(env!("CARGO_BIN_EXE_soroban-xdr-proof"))
+        .arg("--json")
+        .output()
+        .expect("run binary");
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("\"ok\":true"));
+    assert!(stdout.contains("\"checkpoint_seq\":"));
+    assert!(stdout.contains("\"ledger_count\":"));
+    assert!(stdout.contains("\"tip_hash\":"));
+
+    // 2. Invalid CLI argument exits with code 2
+    let output_bad = Command::new(env!("CARGO_BIN_EXE_soroban-xdr-proof"))
+        .arg("--verify-chain")
+        .arg("not_a_valid_chain_syntax")
+        .output()
+        .expect("run binary");
+    assert_eq!(output_bad.status.code(), Some(2));
+
+    // 3. Cryptographic hash mismatch exits with code 3
+    let bad_chain_json = r#"[{"ledger_seq":100,"previous_ledger_hash":"0000000000000000000000000000000000000000000000000000000000000000","header_hash":"1111111111111111111111111111111111111111111111111111111111111111"},{"ledger_seq":101,"previous_ledger_hash":"2222222222222222222222222222222222222222222222222222222222222222","header_hash":"3333333333333333333333333333333333333333333333333333333333333333"}]"#;
+    let output_mismatch = Command::new(env!("CARGO_BIN_EXE_soroban-xdr-proof"))
+        .arg("--verify-chain")
+        .arg(bad_chain_json)
+        .output()
+        .expect("run binary");
+    assert_eq!(output_mismatch.status.code(), Some(3));
+}
