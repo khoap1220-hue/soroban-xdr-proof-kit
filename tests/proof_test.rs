@@ -209,3 +209,104 @@ fn test_signed_stellar_value_and_ledger_header_ext_v1_and_u32_max_checkpoint() {
     // Overflow-safe checkpoint math at u32::MAX
     assert_eq!(checkpoint_for_ledger(u32::MAX), u32::MAX);
 }
+
+#[test]
+fn test_decode_ledger_close_meta_v1_and_v2_success() {
+    for disc in [1u32, 2u32] {
+        let hdr = soroban_xdr_proof_kit::RawLedgerHeaderXdr {
+            ledger_version: 20, // Soroban Mainnet protocol
+            previous_ledger_hash: [0x11; 32],
+            tx_set_hash: [0x22; 32],
+            close_time: 1700000000,
+            upgrades_opaque: vec![],
+            scp_value_ext: 0,
+            tx_set_result_hash: [0x33; 32],
+            bucket_list_hash: [0x44; 32],
+            ledger_seq: 500_000,
+            total_coins: 100_000_000_000,
+            fee_pool: 50_000,
+            inflation_seq: 1,
+            id_pool: 200,
+            base_fee: 100,
+            base_reserve: 5000000,
+            max_tx_set_size: 1000,
+            skip_list: [[0u8; 32]; 4],
+            ext: 0,
+        };
+        let hdr_bytes = hdr.to_xdr_bytes().unwrap();
+
+        let mut raw = Vec::new();
+        raw.extend_from_slice(&disc.to_be_bytes()); // discriminant v1 or v2
+        raw.extend_from_slice(&[0xaa; 32]);         // header_hash
+        raw.extend_from_slice(&hdr_bytes);
+
+        let env = soroban_xdr_proof_kit::decode_ledger_close_meta_header(&raw).unwrap();
+        assert_eq!(env.discriminant, disc);
+        assert_eq!(env.protocol_version, 20);
+        assert_eq!(env.ledger_seq, 500_000);
+        assert_eq!(env.header_hash, [0xaa; 32]);
+        assert_eq!(env.previous_ledger_hash, [0x11; 32]);
+        assert!(env.is_soroban_supported);
+    }
+}
+
+#[test]
+fn test_decode_ledger_close_meta_truncated_buffer_fails() {
+    let raw = vec![0, 0, 0, 1, 0, 0]; // Only 6 bytes (needs at least 36+)
+    let res = soroban_xdr_proof_kit::decode_ledger_close_meta_header(&raw);
+    assert!(matches!(
+        res,
+        Err(soroban_xdr_proof_kit::ProofError::XdrUnexpectedEof { .. })
+    ));
+}
+
+#[test]
+fn test_decode_ledger_close_meta_unsupported_discriminant() {
+    let mut raw = Vec::new();
+    raw.extend_from_slice(&3u32.to_be_bytes()); // discriminant 3 is unsupported
+    raw.extend_from_slice(&[0u8; 64]);
+    let res = soroban_xdr_proof_kit::decode_ledger_close_meta_header(&raw);
+    assert!(matches!(
+        res,
+        Err(soroban_xdr_proof_kit::ProofError::UnsupportedXdrExtension {
+            field: "LedgerCloseMeta",
+            discriminant: 3
+        })
+    ));
+}
+
+#[test]
+fn test_decode_ledger_close_meta_pre_soroban_protocol_rejection() {
+    let hdr = soroban_xdr_proof_kit::RawLedgerHeaderXdr {
+        ledger_version: 19, // Pre-Soroban protocol 19
+        previous_ledger_hash: [0x11; 32],
+        tx_set_hash: [0x22; 32],
+        close_time: 1700000000,
+        upgrades_opaque: vec![],
+        scp_value_ext: 0,
+        tx_set_result_hash: [0x33; 32],
+        bucket_list_hash: [0x44; 32],
+        ledger_seq: 100_000,
+        total_coins: 100_000_000,
+        fee_pool: 100,
+        inflation_seq: 1,
+        id_pool: 10,
+        base_fee: 100,
+        base_reserve: 5000000,
+        max_tx_set_size: 100,
+        skip_list: [[0u8; 32]; 4],
+        ext: 0,
+    };
+    let hdr_bytes = hdr.to_xdr_bytes().unwrap();
+
+    let mut raw = Vec::new();
+    raw.extend_from_slice(&1u32.to_be_bytes()); // v1
+    raw.extend_from_slice(&[0xbb; 32]);
+    raw.extend_from_slice(&hdr_bytes);
+
+    let res = soroban_xdr_proof_kit::decode_ledger_close_meta_header(&raw);
+    assert_eq!(
+        res,
+        Err(soroban_xdr_proof_kit::ProofError::PreSorobanProtocolVersion { version: 19 })
+    );
+}

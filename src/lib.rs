@@ -41,6 +41,7 @@ pub enum ProofError {
     XdrLengthOverflow { length: usize, max_allowed: usize },
     XdrTrailingBytes { remaining: usize },
     UnsupportedXdrExtension { field: &'static str, discriminant: u32 },
+    PreSorobanProtocolVersion { version: u32 },
 }
 
 impl fmt::Display for ProofError {
@@ -83,6 +84,10 @@ impl fmt::Display for ProofError {
             ProofError::UnsupportedXdrExtension { field, discriminant } => write!(
                 f,
                 "unsupported XDR union discriminant {discriminant} on {field}"
+            ),
+            ProofError::PreSorobanProtocolVersion { version } => write!(
+                f,
+                "pre-Soroban protocol version {version} rejected: Soroban requires protocol version >= 20"
             ),
         }
     }
@@ -685,5 +690,77 @@ pub fn verify_ancestry_chain(
         target_hash_hex: normalize_sha256_hex(&first.header_hash_hex)?,
         certified_hash_hex: normalize_sha256_hex(&last.header_hash_hex)?,
         chain_length: sorted.len(),
+    })
+}
+
+/// Envelope containing summary information extracted from a Stellar/Soroban `LedgerCloseMeta` frame.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LedgerCloseMetaEnvelope {
+    pub discriminant: u32,
+    pub protocol_version: u32,
+    pub ledger_seq: u32,
+    pub header_hash: [u8; 32],
+    pub previous_ledger_hash: [u8; 32],
+    pub is_soroban_supported: bool,
+}
+
+/// Decodes the header envelope of a Stellar/Soroban `LedgerCloseMeta` v0/v1/v2 binary XDR frame.
+///
+/// Validates the 4-byte big-endian discriminant (0, 1, or 2), extracts the LedgerHeaderHistoryEntry,
+/// and enforces that the Stellar protocol version is >= 20 for Soroban state verification.
+pub fn decode_ledger_close_meta_header(raw: &[u8]) -> Result<LedgerCloseMetaEnvelope, ProofError> {
+    let mut cur = XdrCursor::new(raw);
+    let discriminant = cur.read_u32()?;
+    if discriminant > 2 {
+        return Err(ProofError::UnsupportedXdrExtension {
+            field: "LedgerCloseMeta",
+            discriminant,
+        });
+    }
+
+    let header_hash = cur.read_hash32()?;
+    let protocol_version = cur.read_u32()?;
+    if protocol_version < 20 {
+        return Err(ProofError::PreSorobanProtocolVersion {
+            version: protocol_version,
+        });
+    }
+
+    let previous_ledger_hash = cur.read_hash32()?;
+    let _tx_set_hash = cur.read_hash32()?;
+    let _close_time = cur.read_u64()?;
+    let _upgrades = cur.read_var_opaque(65_536)?;
+    let scp_value_ext = cur.read_u32()?;
+    match scp_value_ext {
+        0 => {}
+        1 => {
+            let pk_type = cur.read_u32()?;
+            if pk_type != 0 {
+                return Err(ProofError::UnsupportedXdrExtension {
+                    field: "LedgerCloseValueSignature.nodeID",
+                    discriminant: pk_type,
+                });
+            }
+            let _node_ed25519 = cur.read_hash32()?;
+            let _sig = cur.read_var_opaque(64)?;
+        }
+        other => {
+            return Err(ProofError::UnsupportedXdrExtension {
+                field: "StellarValue.ext",
+                discriminant: other,
+            });
+        }
+    }
+    let _tx_set_result_hash = cur.read_hash32()?;
+    let _bucket_list_hash = cur.read_hash32()?;
+    let ledger_seq = cur.read_u32()?;
+
+    Ok(LedgerCloseMetaEnvelope {
+        discriminant,
+        protocol_version,
+        ledger_seq,
+        header_hash,
+        previous_ledger_hash,
+        is_soroban_supported: protocol_version >= 20,
     })
 }
