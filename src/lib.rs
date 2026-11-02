@@ -687,3 +687,49 @@ pub fn verify_ancestry_chain(
         chain_length: sorted.len(),
     })
 }
+
+/// Represents a sibling node in a binary Merkle inclusion proof path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MerkleSibling {
+    pub hash: [u8; 32],
+    pub is_left: bool,
+}
+
+/// Verifies a domain-separated binary SHA-256 Merkle inclusion proof for a contract data entry or bucket-list leaf.
+///
+/// Domain separation prefixes prevent second-preimage attacks:
+/// - Leaves: `SHA256(0x00 || leaf_data)`
+/// - Internal nodes: `SHA256(0x01 || left_child || right_child)`
+pub fn verify_merkle_inclusion(
+    leaf_data: &[u8],
+    proof: &[MerkleSibling],
+    expected_root: &[u8; 32],
+) -> Result<(), ProofError> {
+    let mut leaf_buf = Vec::with_capacity(1 + leaf_data.len());
+    leaf_buf.push(0x00);
+    leaf_buf.extend_from_slice(leaf_data);
+    let mut current_hash = sha256_digest(&leaf_buf);
+
+    for sibling in proof {
+        let mut node_buf = Vec::with_capacity(1 + 32 + 32);
+        node_buf.push(0x01);
+        if sibling.is_left {
+            node_buf.extend_from_slice(&sibling.hash);
+            node_buf.extend_from_slice(&current_hash);
+        } else {
+            node_buf.extend_from_slice(&current_hash);
+            node_buf.extend_from_slice(&sibling.hash);
+        }
+        current_hash = sha256_digest(&node_buf);
+    }
+
+    if &current_hash != expected_root {
+        return Err(ProofError::HashMismatch {
+            ledger_seq: 0,
+            expected_hex: bytes_to_hex(expected_root),
+            actual_hex: bytes_to_hex(&current_hash),
+        });
+    }
+
+    Ok(())
+}

@@ -209,3 +209,96 @@ fn test_signed_stellar_value_and_ledger_header_ext_v1_and_u32_max_checkpoint() {
     // Overflow-safe checkpoint math at u32::MAX
     assert_eq!(checkpoint_for_ledger(u32::MAX), u32::MAX);
 }
+
+#[test]
+fn test_verify_merkle_inclusion_1_4_8_leaves_and_tamper() {
+    use soroban_xdr_proof_kit::{sha256_digest, verify_merkle_inclusion, MerkleSibling};
+
+    fn leaf_hash(data: &[u8]) -> [u8; 32] {
+        let mut b = Vec::with_capacity(1 + data.len());
+        b.push(0x00);
+        b.extend_from_slice(data);
+        sha256_digest(&b)
+    }
+
+    fn node_hash(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
+        let mut b = Vec::with_capacity(1 + 64);
+        b.push(0x01);
+        b.extend_from_slice(left);
+        b.extend_from_slice(right);
+        sha256_digest(&b)
+    }
+
+    // 1. 1-leaf tree
+    let leaf0 = b"contract_key_soroban_balance_user1";
+    let root1 = leaf_hash(leaf0);
+    assert!(verify_merkle_inclusion(leaf0, &[], &root1).is_ok());
+
+    // 2. 4-leaf tree
+    let l0 = b"key_0";
+    let l1 = b"key_1";
+    let l2 = b"key_2";
+    let l3 = b"key_3";
+
+    let h0 = leaf_hash(l0);
+    let h1 = leaf_hash(l1);
+    let h2 = leaf_hash(l2);
+    let h3 = leaf_hash(l3);
+
+    let n01 = node_hash(&h0, &h1);
+    let n23 = node_hash(&h2, &h3);
+    let root4 = node_hash(&n01, &n23);
+
+    // Proof for l0 (h1 is right, n23 is right)
+    let proof_l0 = vec![
+        MerkleSibling { hash: h1, is_left: false },
+        MerkleSibling { hash: n23, is_left: false },
+    ];
+    assert!(verify_merkle_inclusion(l0, &proof_l0, &root4).is_ok());
+
+    // Proof for l2 (h3 is right, n01 is left)
+    let proof_l2 = vec![
+        MerkleSibling { hash: h3, is_left: false },
+        MerkleSibling { hash: n01, is_left: true },
+    ];
+    assert!(verify_merkle_inclusion(l2, &proof_l2, &root4).is_ok());
+
+    // 3. 8-leaf tree
+    let leaves: Vec<Vec<u8>> = (0..8).map(|i| format!("soroban_storage_entry_{i}").into_bytes()).collect();
+    let level0: Vec<[u8; 32]> = leaves.iter().map(|l| leaf_hash(l)).collect();
+    let mut level1 = Vec::new();
+    for i in (0..8).step_by(2) {
+        level1.push(node_hash(&level0[i], &level0[i + 1]));
+    }
+    let mut level2 = Vec::new();
+    for i in (0..4).step_by(2) {
+        level2.push(node_hash(&level1[i], &level1[i + 1]));
+    }
+    let root8 = node_hash(&level2[0], &level2[1]);
+
+    // Proof for leaf 5 (index 5)
+    // Sibling at level 0: leaf 4 (left of 5)
+    // Sibling at level 1: pair (6,7) -> level1[3] (right of pair 4,5)
+    // Sibling at level 2: pair (0,1,2,3) -> level2[0] (left of 4,5,6,7)
+    let proof_l5 = vec![
+        MerkleSibling { hash: level0[4], is_left: true },
+        MerkleSibling { hash: level1[3], is_left: false },
+        MerkleSibling { hash: level2[0], is_left: true },
+    ];
+    assert!(verify_merkle_inclusion(&leaves[5], &proof_l5, &root8).is_ok());
+
+    // 4. Tampered sibling hash rejection
+    let mut tampered_proof = proof_l5.clone();
+    tampered_proof[0].hash[0] ^= 0x01;
+    assert!(verify_merkle_inclusion(&leaves[5], &tampered_proof, &root8).is_err());
+
+    // 5. Wrong sibling position (flip is_left)
+    let mut flipped_pos_proof = proof_l5.clone();
+    flipped_pos_proof[0].is_left = !flipped_pos_proof[0].is_left;
+    assert!(verify_merkle_inclusion(&leaves[5], &flipped_pos_proof, &root8).is_err());
+
+    // 6. Bit-flipped root rejection
+    let mut bad_root = root8;
+    bad_root[31] ^= 0xff;
+    assert!(verify_merkle_inclusion(&leaves[5], &proof_l5, &bad_root).is_err());
+}
