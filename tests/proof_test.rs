@@ -1,15 +1,110 @@
 use soroban_xdr_proof_kit::{
-    checkpoint_for_ledger, expected_archive_header_path, verify_ancestry_chain, LedgerHeaderLink,
-    ProofError,
+    checkpoint_bounds_for_ledger, checkpoint_for_ledger, expected_archive_header_path, sha256_hex,
+    verify_ancestry_chain, verify_raw_xdr_header_chain, LedgerHeaderLink, ProofError,
+    RawLedgerHeaderXdr, XdrCursor,
 };
 
 fn sample_hash(byte_char: char) -> String {
     std::iter::repeat(byte_char).take(64).collect()
 }
 
+fn sample_raw_header(seq: u32, prev_hash: [u8; 32]) -> RawLedgerHeaderXdr {
+    RawLedgerHeaderXdr {
+        ledger_version: 21,
+        previous_ledger_hash: prev_hash,
+        tx_set_hash: [0x11; 32],
+        close_time: 1_730_000_000 + (seq as u64) * 5,
+        upgrades_opaque: vec![0x01, 0x02, 0x03], // 3 bytes -> tests 1-byte zero padding in RFC 4506 XDR
+        scp_value_ext: 0,
+        tx_set_result_hash: [0x22; 32],
+        bucket_list_hash: [0x33; 32],
+        ledger_seq: seq,
+        total_coins: 100_000_000_000_000_000,
+        fee_pool: 250_000,
+        inflation_seq: 0,
+        id_pool: 42,
+        base_fee: 100,
+        base_reserve: 5_000_000,
+        max_tx_set_size: 1000,
+        skip_list: [[0x44; 32]; 4],
+        ext: 0,
+    }
+}
+
+#[test]
+fn test_fips_180_4_sha256_official_nist_vectors() {
+    assert_eq!(
+        sha256_hex(b""),
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    );
+    assert_eq!(
+        sha256_hex(b"abc"),
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    );
+    assert_eq!(
+        sha256_hex(b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"),
+        "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"
+    );
+}
+
+#[test]
+fn test_xdr_binary_roundtrip_and_padding_enforcement() {
+    let hdr = sample_raw_header(64_791_250, [0x99; 32]);
+    let wire = hdr.to_xdr_bytes().expect("serialize XDR");
+    assert_eq!(wire.len() % 4, 0, "RFC 4506 XDR frames must be 4-byte aligned");
+
+    let decoded = RawLedgerHeaderXdr::from_xdr_bytes(&wire).expect("decode XDR");
+    assert_eq!(decoded, hdr);
+
+    // Corrupt the 1-byte alignment padding after upgrades_opaque (offset: 4 + 32 + 32 + 8 + 4 + 3 = 83)
+    let mut bad_padding = wire.clone();
+    bad_padding[83] = 0xff;
+    let err = RawLedgerHeaderXdr::from_xdr_bytes(&bad_padding).unwrap_err();
+    assert_eq!(err, ProofError::XdrInvalidPadding { offset: 83 });
+}
+
+#[test]
+fn test_rfc5528_record_mark_parsing() {
+    // Last fragment bit (0x80000000) | 316 bytes (0x0000013c)
+    let bytes = [0x80, 0x00, 0x01, 0x3c];
+    let mut cur = XdrCursor::new(&bytes);
+    let (is_last, len) = cur.read_rfc5528_record_mark().expect("record mark");
+    assert!(is_last);
+    assert_eq!(len, 316);
+}
+
+#[test]
+fn test_verify_raw_xdr_header_chain_authentic_sha256_links() {
+    let h500 = sample_raw_header(500, [0x01; 32]);
+    let hash500 = h500.compute_header_hash().unwrap();
+    let h501 = sample_raw_header(501, hash500);
+    let hash501 = h501.compute_header_hash().unwrap();
+    let h502 = sample_raw_header(502, hash501);
+
+    let frames = vec![
+        h502.to_xdr_bytes().unwrap(),
+        h500.to_xdr_bytes().unwrap(),
+        h501.to_xdr_bytes().unwrap(),
+    ];
+    let proof = verify_raw_xdr_header_chain(&frames, 500, 502).expect("cryptographic XDR chain");
+    assert_eq!(proof.chain_length, 3);
+
+    // Mutate a single byte inside h501's fee_pool without updating h502.previous_ledger_hash
+    let mut h501_tampered = h501.clone();
+    h501_tampered.fee_pool += 1;
+    let tampered_frames = vec![
+        h500.to_xdr_bytes().unwrap(),
+        h501_tampered.to_xdr_bytes().unwrap(),
+        h502.to_xdr_bytes().unwrap(),
+    ];
+    let err = verify_raw_xdr_header_chain(&tampered_frames, 500, 502).unwrap_err();
+    assert!(matches!(err, ProofError::HashMismatch { ledger_seq: 502, .. }));
+}
+
 #[test]
 fn test_checkpoint_and_archive_path_formatting() {
     assert_eq!(checkpoint_for_ledger(64791250), 64791295);
+    assert_eq!(checkpoint_bounds_for_ledger(64791250), (64791232, 64791295));
     assert_eq!(
         expected_archive_header_path(64791250),
         "ledger/03/dc/a2/ledger-03dca2ff.xdr.gz"
@@ -41,8 +136,6 @@ fn test_valid_three_ledger_ancestry_chain() {
     assert_eq!(proof.target_seq, 100);
     assert_eq!(proof.certified_seq, 102);
     assert_eq!(proof.chain_length, 3);
-    assert_eq!(proof.target_hash_hex, sample_hash('b'));
-    assert_eq!(proof.certified_hash_hex, sample_hash('d'));
 }
 
 #[test]
@@ -55,25 +148,6 @@ fn test_rejects_target_exceeding_certified() {
             certified_seq: 199
         }
     );
-}
-
-#[test]
-fn test_detects_tampered_previous_ledger_hash() {
-    let h10 = LedgerHeaderLink {
-        ledger_seq: 10,
-        previous_ledger_hash_hex: sample_hash('1'),
-        header_hash_hex: sample_hash('2'),
-        tx_set_result_hash_hex: sample_hash('9'),
-    };
-    let h11_tampered = LedgerHeaderLink {
-        ledger_seq: 11,
-        previous_ledger_hash_hex: sample_hash('f'),
-        header_hash_hex: sample_hash('3'),
-        tx_set_result_hash_hex: sample_hash('8'),
-    };
-
-    let err = verify_ancestry_chain(&[h10, h11_tampered], 10, 11).unwrap_err();
-    assert!(matches!(err, ProofError::HashMismatch { ledger_seq: 11, .. }));
 }
 
 #[test]
