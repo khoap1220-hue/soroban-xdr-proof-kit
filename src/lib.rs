@@ -687,3 +687,20 @@ pub fn verify_ancestry_chain(
         chain_length: sorted.len(),
     })
 }
+
+/// Verifies a binary SHA-256 Merkle inclusion branch (`side = false` for left sibling, `true` for right sibling).
+pub fn verify_merkle_branch(leaf_hash: &[u8; 32], branch: &[([u8; 32], bool)], expected_root: &[u8; 32]) -> bool {
+    let mut acc = *leaf_hash;
+    for (sibling, is_right_sibling) in branch {
+        let mut buf = [0u8; 64];
+        if *is_right_sibling {
+            buf[..32].copy_from_slice(&acc);
+            buf[32..].copy_from_slice(sibling);
+        } else {
+            buf[..32].copy_from_slice(sibling);
+            buf[32..].copy_from_slice(&acc);
+        }
+        acc = sha256_digest(&buf);
+    }
+    &acc == expected_root
+}
