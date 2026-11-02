@@ -40,6 +40,7 @@ pub enum ProofError {
     XdrInvalidPadding { offset: usize },
     XdrLengthOverflow { length: usize, max_allowed: usize },
     XdrTrailingBytes { remaining: usize },
+    UnsupportedXdrExtension { field: &'static str, discriminant: u32 },
 }
 
 impl fmt::Display for ProofError {
@@ -62,7 +63,7 @@ impl fmt::Display for ProofError {
                 f,
                 "missing ledger header {ledger_seq} (expected archive object: {expected_archive_path})"
             ),
-            ProofError::InvalidDigestHex(msg) => write!(f, "invalid 32-byte hex digest: {msg}"),
+            ProofError::InvalidDigestHex(msg) => write!(f, "invalid hex input: {msg}"),
             ProofError::XdrUnexpectedEof { needed, remaining } => write!(
                 f,
                 "XDR buffer underflow: needed {needed} bytes, only {remaining} remaining"
@@ -78,6 +79,10 @@ impl fmt::Display for ProofError {
             ProofError::XdrTrailingBytes { remaining } => write!(
                 f,
                 "XDR frame contains {remaining} unexpected trailing bytes"
+            ),
+            ProofError::UnsupportedXdrExtension { field, discriminant } => write!(
+                f,
+                "unsupported XDR union discriminant {discriminant} on {field}"
             ),
         }
     }
@@ -163,7 +168,7 @@ pub fn sha256_digest(data: &[u8]) -> [u8; 32] {
     out
 }
 
-/// Encodes a 32-byte digest as a 64-character lowercase hex string.
+/// Encodes a byte slice as a lowercase hex string.
 pub fn bytes_to_hex(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
@@ -174,16 +179,31 @@ pub fn bytes_to_hex(bytes: &[u8]) -> String {
     out
 }
 
+/// Decodes an arbitrary even-length hex string into raw bytes.
+pub fn hex_to_bytes(input: &str) -> Result<Vec<u8>, ProofError> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() || trimmed.len() % 2 != 0 || !trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(ProofError::InvalidDigestHex(format!(
+            "expected non-empty even-length hex string, got length {}",
+            trimmed.len()
+        )));
+    }
+    let bytes = trimmed.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len() / 2);
+    for i in 0..(bytes.len() / 2) {
+        let hi = (bytes[i * 2] as char).to_digit(16).unwrap() as u8;
+        let lo = (bytes[i * 2 + 1] as char).to_digit(16).unwrap() as u8;
+        out.push((hi << 4) | lo);
+    }
+    Ok(out)
+}
+
 /// Parses a 64-character hex string into a 32-byte array.
 pub fn hex_to_hash32(input: &str) -> Result<[u8; 32], ProofError> {
     let norm = normalize_sha256_hex(input)?;
+    let raw = hex_to_bytes(&norm)?;
     let mut out = [0u8; 32];
-    let bytes = norm.as_bytes();
-    for i in 0..32 {
-        let hi = (bytes[i * 2] as char).to_digit(16).unwrap() as u8;
-        let lo = (bytes[i * 2 + 1] as char).to_digit(16).unwrap() as u8;
-        out[i] = (hi << 4) | lo;
-    }
+    out.copy_from_slice(&raw);
     Ok(out)
 }
 
@@ -330,7 +350,20 @@ impl RawLedgerHeaderXdr {
                 max_allowed: 65_536,
             });
         }
-        let mut out = Vec::with_capacity(320 + self.upgrades_opaque.len());
+        if self.scp_value_ext > 1 {
+            return Err(ProofError::UnsupportedXdrExtension {
+                field: "StellarValue.ext",
+                discriminant: self.scp_value_ext,
+            });
+        }
+        if self.ext > 1 {
+            return Err(ProofError::UnsupportedXdrExtension {
+                field: "LedgerHeader.ext",
+                discriminant: self.ext,
+            });
+        }
+
+        let mut out = Vec::with_capacity(340 + self.upgrades_opaque.len());
         out.extend_from_slice(&self.ledger_version.to_be_bytes());
         out.extend_from_slice(&self.previous_ledger_hash);
         out.extend_from_slice(&self.tx_set_hash);
@@ -345,6 +378,14 @@ impl RawLedgerHeaderXdr {
         }
 
         out.extend_from_slice(&self.scp_value_ext.to_be_bytes());
+        if self.scp_value_ext == 1 {
+            // STELLAR_VALUE_SIGNED: PublicKey (PUBLIC_KEY_TYPE_ED25519 = 0 + 32B key) + Signature (64B)
+            out.extend_from_slice(&0u32.to_be_bytes());
+            out.extend_from_slice(&[0u8; 32]);
+            out.extend_from_slice(&64u32.to_be_bytes());
+            out.extend_from_slice(&[0u8; 64]);
+        }
+
         out.extend_from_slice(&self.tx_set_result_hash);
         out.extend_from_slice(&self.bucket_list_hash);
         out.extend_from_slice(&self.ledger_seq.to_be_bytes());
@@ -359,10 +400,17 @@ impl RawLedgerHeaderXdr {
             out.extend_from_slice(skip);
         }
         out.extend_from_slice(&self.ext.to_be_bytes());
+        if self.ext == 1 {
+            // LedgerHeaderExtensionV1: flags (u32) + ext union discriminant 0 (u32)
+            out.extend_from_slice(&0u32.to_be_bytes());
+            out.extend_from_slice(&0u32.to_be_bytes());
+        }
         Ok(out)
     }
 
     /// Decodes a canonical Stellar `LedgerHeader` from RFC 4506 Big-Endian XDR bytes.
+    /// Supports both `STELLAR_VALUE_BASIC` (`0`) and `STELLAR_VALUE_SIGNED` (`1`), as well
+    /// as `LedgerHeader.ext == 0` and `LedgerHeaderExtensionV1` (`ext == 1`).
     pub fn from_xdr_bytes(bytes: &[u8]) -> Result<Self, ProofError> {
         let mut cur = XdrCursor::new(bytes);
         let ledger_version = cur.read_u32()?;
@@ -371,6 +419,27 @@ impl RawLedgerHeaderXdr {
         let close_time = cur.read_u64()?;
         let upgrades_opaque = cur.read_var_opaque(65_536)?;
         let scp_value_ext = cur.read_u32()?;
+        match scp_value_ext {
+            0 => {}
+            1 => {
+                // STELLAR_VALUE_SIGNED: NodeID (PublicKey) + Signature (opaque<64>)
+                let pk_type = cur.read_u32()?;
+                if pk_type != 0 {
+                    return Err(ProofError::UnsupportedXdrExtension {
+                        field: "LedgerCloseValueSignature.nodeID",
+                        discriminant: pk_type,
+                    });
+                }
+                let _node_ed25519 = cur.read_hash32()?;
+                let _sig = cur.read_var_opaque(64)?;
+            }
+            other => {
+                return Err(ProofError::UnsupportedXdrExtension {
+                    field: "StellarValue.ext",
+                    discriminant: other,
+                });
+            }
+        }
         let tx_set_result_hash = cur.read_hash32()?;
         let bucket_list_hash = cur.read_hash32()?;
         let ledger_seq = cur.read_u32()?;
@@ -388,6 +457,26 @@ impl RawLedgerHeaderXdr {
             cur.read_hash32()?,
         ];
         let ext = cur.read_u32()?;
+        match ext {
+            0 => {}
+            1 => {
+                // LedgerHeaderExtensionV1: uint32 flags + ext union (discriminant 0)
+                let _flags = cur.read_u32()?;
+                let v1_ext = cur.read_u32()?;
+                if v1_ext != 0 {
+                    return Err(ProofError::UnsupportedXdrExtension {
+                        field: "LedgerHeaderExtensionV1.ext",
+                        discriminant: v1_ext,
+                    });
+                }
+            }
+            other => {
+                return Err(ProofError::UnsupportedXdrExtension {
+                    field: "LedgerHeader.ext",
+                    discriminant: other,
+                });
+            }
+        }
         cur.ensure_complete()?;
 
         Ok(Self {
@@ -450,10 +539,12 @@ pub struct VerifiedAncestryProof {
 }
 
 /// Computes the canonical Stellar history archive checkpoint sequence (`64 * n - 1`)
-/// containing the given `ledger_seq`.
+/// containing the given `ledger_seq` using overflow-safe 64-bit arithmetic.
 pub fn checkpoint_for_ledger(ledger_seq: u32) -> u32 {
-    let bucket = (ledger_seq / CHECKPOINT_FREQUENCY) + 1;
-    (bucket * CHECKPOINT_FREQUENCY) - 1
+    let freq = CHECKPOINT_FREQUENCY as u64;
+    let bucket = ((ledger_seq as u64) / freq) + 1;
+    let chk = (bucket * freq) - 1;
+    chk.min(u32::MAX as u64) as u32
 }
 
 /// Computes the inclusive `[start_seq, end_seq]` ledger range covered by the checkpoint
@@ -541,8 +632,14 @@ pub fn verify_ancestry_chain(
     let mut sorted = headers.to_vec();
     sorted.sort_by_key(|h| h.ledger_seq);
     sorted.retain(|h| h.ledger_seq >= target_seq && h.ledger_seq <= certified_seq);
+    sorted.dedup_by(|a, b| {
+        a.ledger_seq == b.ledger_seq
+            && a.header_hash_hex.eq_ignore_ascii_case(&b.header_hash_hex)
+            && a.previous_ledger_hash_hex
+                .eq_ignore_ascii_case(&b.previous_ledger_hash_hex)
+    });
 
-    let expected_len = (certified_seq - target_seq + 1) as usize;
+    let expected_len = ((certified_seq as u64) - (target_seq as u64) + 1) as usize;
     if sorted.len() != expected_len {
         for seq in target_seq..=certified_seq {
             if sorted.binary_search_by_key(&seq, |h| h.ledger_seq).is_err() {

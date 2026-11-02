@@ -165,7 +165,7 @@ fn test_reports_exact_archive_path_on_missing_header() {
         tx_set_result_hash_hex: sample_hash('3'),
     };
 
-    let err = verify_ancestry_chain(&[h100, h102], 100, 102).unwrap_err();
+    let err = verify_ancestry_chain(&[h100.clone(), h102.clone()], 100, 102).unwrap_err();
     assert_eq!(
         err,
         ProofError::MissingHeader {
@@ -173,4 +173,39 @@ fn test_reports_exact_archive_path_on_missing_header() {
             expected_archive_path: "ledger/00/00/00/ledger-0000007f.xdr.gz".to_string()
         }
     );
+
+    // Even if duplicate h100 is supplied so slice length == 3, missing 101 is still caught as MissingHeader
+    let err_dup = verify_ancestry_chain(&[h100.clone(), h100, h102], 100, 102).unwrap_err();
+    assert_eq!(
+        err_dup,
+        ProofError::MissingHeader {
+            ledger_seq: 101,
+            expected_archive_path: "ledger/00/00/00/ledger-0000007f.xdr.gz".to_string()
+        }
+    );
+}
+
+#[test]
+fn test_signed_stellar_value_and_ledger_header_ext_v1_and_u32_max_checkpoint() {
+    let mut hdr = sample_raw_header(64_791_255, [0x77; 32]);
+    hdr.scp_value_ext = 1; // STELLAR_VALUE_SIGNED
+    hdr.ext = 1; // LedgerHeaderExtensionV1
+    let wire = hdr.to_xdr_bytes().expect("serialize signed ext=1 XDR");
+    let decoded = RawLedgerHeaderXdr::from_xdr_bytes(&wire).expect("decode signed ext=1 XDR");
+    assert_eq!(decoded, hdr);
+
+    // Unsupported union arm (ext = 99) must return UnsupportedXdrExtension
+    let mut bad_hdr = hdr;
+    bad_hdr.ext = 99;
+    let err = bad_hdr.to_xdr_bytes().unwrap_err();
+    assert_eq!(
+        err,
+        ProofError::UnsupportedXdrExtension {
+            field: "LedgerHeader.ext",
+            discriminant: 99
+        }
+    );
+
+    // Overflow-safe checkpoint math at u32::MAX
+    assert_eq!(checkpoint_for_ledger(u32::MAX), u32::MAX);
 }

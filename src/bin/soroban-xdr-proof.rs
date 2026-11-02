@@ -1,5 +1,6 @@
 use soroban_xdr_proof_kit::{
-    checkpoint_bounds_for_ledger, checkpoint_for_ledger, expected_archive_header_path, sha256_hex,
+    bytes_to_hex, checkpoint_bounds_for_ledger, checkpoint_for_ledger,
+    expected_archive_header_path, hex_to_bytes, sha256_digest, sha256_hex,
     verify_raw_xdr_header_chain, RawLedgerHeaderXdr,
 };
 use std::env;
@@ -34,6 +35,7 @@ fn main() {
         eprintln!("Usage:");
         eprintln!("  soroban-xdr-proof checkpoint <ledger_seq>");
         eprintln!("  soroban-xdr-proof sha256 <string>");
+        eprintln!("  soroban-xdr-proof decode-xdr <hex_bytes>");
         eprintln!("  soroban-xdr-proof prove-xdr-range <target_seq> <certified_seq>");
         process::exit(1);
     }
@@ -54,6 +56,37 @@ fn main() {
         "sha256" => {
             let payload = args.get(2).map(|s| s.as_bytes()).unwrap_or(b"");
             println!("{}", sha256_hex(payload));
+        }
+        "decode-xdr" => {
+            let hex_arg = args.get(2).map(|s| s.as_str()).unwrap_or("");
+            let raw = match hex_to_bytes(hex_arg) {
+                Ok(b) => b,
+                Err(e) => {
+                    eprintln!("{{\"valid\":false,\"error\":\"{e}\"}}");
+                    process::exit(2);
+                }
+            };
+            match RawLedgerHeaderXdr::from_xdr_bytes(&raw) {
+                Ok(hdr) => {
+                    let wire_hash = bytes_to_hex(&sha256_digest(&raw));
+                    let prev_hex = bytes_to_hex(&hdr.previous_ledger_hash);
+                    let archive_path = expected_archive_header_path(hdr.ledger_seq);
+                    println!(
+                        "{{\"valid\":true,\"ledger_seq\":{},\"ledger_version\":{},\"scp_value_ext\":{},\"ext\":{},\"previous_ledger_hash\":\"{}\",\"header_hash\":\"{}\",\"archive_path\":\"{}\"}}",
+                        hdr.ledger_seq,
+                        hdr.ledger_version,
+                        hdr.scp_value_ext,
+                        hdr.ext,
+                        prev_hex,
+                        wire_hash,
+                        archive_path
+                    );
+                }
+                Err(e) => {
+                    eprintln!("{{\"valid\":false,\"error\":\"{e}\"}}");
+                    process::exit(2);
+                }
+            }
         }
         "prove-xdr-range" => {
             let target_seq: u32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(1000);
