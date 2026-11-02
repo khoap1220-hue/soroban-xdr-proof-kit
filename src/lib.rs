@@ -15,6 +15,9 @@ use std::fmt;
 /// Standard Stellar history archive checkpoint frequency (every 64 ledgers).
 pub const CHECKPOINT_FREQUENCY: u32 = 64;
 
+/// Maximum allowable single RFC 4506 XDR frame size in bytes (16 MiB).
+pub const MAX_XDR_FRAME_BYTES: usize = 16 * 1024 * 1024;
+
 /// FIPS 180-4 SHA-256 round constants (first 32 bits of the fractional parts of the cube roots of the first 64 primes).
 const SHA256_K: [u32; 64] = [
     0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
@@ -549,6 +552,28 @@ pub fn checkpoint_for_ledger(ledger_seq: u32) -> u32 {
 
 /// Computes the inclusive `[start_seq, end_seq]` ledger range covered by the checkpoint
 /// containing `ledger_seq`.
+/// Checks whether a ledger sequence is a canonical checkpoint boundary (`64 * n - 1`).
+pub fn is_checkpoint_ledger(ledger_seq: u32) -> bool {
+    (ledger_seq as u64 + 1) % (CHECKPOINT_FREQUENCY as u64) == 0
+}
+
+/// Computes the greatest canonical checkpoint boundary (`64 * n - 1`) <= `ledger_seq`.
+/// Returns 0 for ledgers prior to the first completed checkpoint (ledger < 63).
+pub fn checkpoint_floor(ledger_seq: u32) -> u32 {
+    let freq = CHECKPOINT_FREQUENCY as u64;
+    let bucket = (ledger_seq as u64 + 1) / freq;
+    if bucket == 0 {
+        0
+    } else {
+        ((bucket * freq) - 1).min(u32::MAX as u64) as u32
+    }
+}
+
+/// Computes the smallest canonical checkpoint boundary (`64 * n - 1`) >= `ledger_seq`.
+pub fn checkpoint_ceil(ledger_seq: u32) -> u32 {
+    checkpoint_for_ledger(ledger_seq)
+}
+
 pub fn checkpoint_bounds_for_ledger(ledger_seq: u32) -> (u32, u32) {
     let end_seq = checkpoint_for_ledger(ledger_seq);
     let start_seq = if end_seq < CHECKPOINT_FREQUENCY {

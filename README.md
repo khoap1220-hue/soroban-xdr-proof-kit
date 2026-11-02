@@ -43,6 +43,34 @@ cargo run --bin soroban-xdr-proof -- checkpoint 64791250
 cargo run --bin soroban-xdr-proof -- prove-xdr-range 1000 1004
 ```
 
+
+## 📐 RFC 4506 & RFC 5528 Framing Invariants
+
+Stellar History Archives stream XDR structures using the RFC 4506 External Data Representation standard with RFC 5528 Record Marking framing.
+
+| Invariant | Specification | Enforcement in `soroban-xdr-proof-kit` |
+|---|---|---|
+| **4-Byte Alignment** | Variable-length opaque payloads must be padded with 0..3 null bytes to a 4-byte boundary. | Non-zero padding bytes trigger `ProofError::XdrInvalidPadding`. |
+| **Record Marking** | 32-bit header containing 1-bit EOR flag (bit 31) and 31-bit byte length (bits 0..30). | `read_rfc5528_record_mark` parses `(is_last, byte_len)`. |
+| **Max Frame Size** | Individual frames must not exceed `MAX_XDR_FRAME_BYTES` (16 MiB). | Buffers exceeding maximum return `ProofError::XdrLengthOverflow`. |
+| **Buffer Integrity** | Stream must terminate cleanly without unparsed trailing bytes or underflow. | Enforced by `XdrUnexpectedEof` and `XdrTrailingBytes`. |
+
+### Error Variants Table
+
+| `ProofError` Variant | Cause |
+|---|---|
+| `EmptyChain` | Input header link slice is empty. |
+| `TargetExceedsCertified` | Queried target sequence > certified anchor sequence. |
+| `SequenceDiscontinuity` | Missing ledger sequence along contiguous verification path. |
+| `HashMismatch` | Claimed `previous_ledger_hash` does not match parent's SHA-256 digest. |
+| `MissingHeader` | History archive object missing for intermediate checkpoint ledger. |
+| `InvalidDigestHex` | Non-hexadecimal or malformed SHA-256 hash string. |
+| `XdrUnexpectedEof` | Buffer depleted before reading required XDR bytes. |
+| `XdrInvalidPadding` | Non-zero byte detected in 4-byte alignment padding. |
+| `XdrLengthOverflow` | Variable opaque length field exceeds configured maximum threshold. |
+| `XdrTrailingBytes` | Unparsed extra bytes remain at the end of an XDR frame. |
+| `UnsupportedXdrExtension` | Unsupported union discriminant encountered in XDR struct. |
+
 ## 🧪 Running Tests
 
 ```bash

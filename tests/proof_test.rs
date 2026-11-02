@@ -209,3 +209,96 @@ fn test_signed_stellar_value_and_ledger_header_ext_v1_and_u32_max_checkpoint() {
     // Overflow-safe checkpoint math at u32::MAX
     assert_eq!(checkpoint_for_ledger(u32::MAX), u32::MAX);
 }
+
+#[test]
+fn test_rfc4506_boundary_and_malformed_frame_vectors() {
+    use soroban_xdr_proof_kit::{XdrCursor, MAX_XDR_FRAME_BYTES};
+
+    // Table-driven boundary tests: 0, 3, 4, MAX_XDR_FRAME_BYTES, MAX_XDR_FRAME_BYTES + 4, 0x7FFF_FFFF
+    struct BoundaryCase {
+        len: usize,
+        pad_byte: u8,
+        max_allowed: usize,
+        expect_ok: bool,
+    }
+
+    let cases = vec![
+        // Length 0: exactly 4 bytes (len field), no payload, 0 padding
+        BoundaryCase { len: 0, pad_byte: 0, max_allowed: 1024, expect_ok: true },
+        // Length 3: 3 bytes payload + 1 zero pad byte
+        BoundaryCase { len: 3, pad_byte: 0, max_allowed: 1024, expect_ok: true },
+        // Length 3 with corrupted non-zero padding byte
+        BoundaryCase { len: 3, pad_byte: 0xff, max_allowed: 1024, expect_ok: false },
+        // Length 4: 4 bytes payload + 0 pad bytes
+        BoundaryCase { len: 4, pad_byte: 0, max_allowed: 1024, expect_ok: true },
+        // Length MAX_XDR_FRAME_BYTES within limit
+        BoundaryCase { len: 16, pad_byte: 0, max_allowed: 16, expect_ok: true },
+        // Length exceeding max_allowed
+        BoundaryCase { len: MAX_XDR_FRAME_BYTES + 4, pad_byte: 0, max_allowed: MAX_XDR_FRAME_BYTES, expect_ok: false },
+    ];
+
+    for c in cases {
+        let pad_len = (4 - (c.len % 4)) % 4;
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&(c.len as u32).to_be_bytes());
+        buf.resize(4 + c.len, 0x5a);
+        for _ in 0..pad_len {
+            buf.push(c.pad_byte);
+        }
+
+        let mut cur = XdrCursor::new(&buf);
+        let res = cur.read_var_opaque(c.max_allowed);
+        if c.expect_ok {
+            assert!(res.is_ok(), "expected len {} to succeed, got {:?}", c.len, res);
+            assert_eq!(res.unwrap().len(), c.len);
+        } else {
+            assert!(res.is_err(), "expected len {} to fail", c.len);
+        }
+    }
+
+    // Record mark parsing boundaries: 0, 0x7FFF_FFFF
+    let mut rm_cur_0 = XdrCursor::new(&[0x00, 0x00, 0x00, 0x00]);
+    assert_eq!(rm_cur_0.read_rfc5528_record_mark().unwrap(), (false, 0));
+
+    let mut rm_cur_max = XdrCursor::new(&[0x7f, 0xff, 0xff, 0xff]);
+    assert_eq!(rm_cur_max.read_rfc5528_record_mark().unwrap(), (false, 0x7fff_ffff));
+
+    let mut rm_cur_eor_max = XdrCursor::new(&[0xff, 0xff, 0xff, 0xff]);
+    assert_eq!(rm_cur_eor_max.read_rfc5528_record_mark().unwrap(), (true, 0x7fff_ffff));
+}
+
+#[test]
+fn test_checkpoint_boundary_helpers_exact_ledgers() {
+    use soroban_xdr_proof_kit::{checkpoint_ceil, checkpoint_floor, is_checkpoint_ledger};
+
+    // Test matrix at ledger 0, 1, 63, 64, 65, 127, 128, and u32::MAX - 64
+    let vectors: Vec<(u32, bool, u32, u32)> = vec![
+        // (ledger, is_checkpoint, expected_floor, expected_ceil)
+        (0, false, 0, 63),
+        (1, false, 0, 63),
+        (63, true, 63, 63),
+        (64, false, 63, 127),
+        (65, false, 63, 127),
+        (127, true, 127, 127),
+        (128, false, 127, 191),
+        (u32::MAX - 64, true, u32::MAX - 64, u32::MAX - 64),
+    ];
+
+    for (ledger, is_chk, exp_floor, exp_ceil) in vectors {
+        assert_eq!(
+            is_checkpoint_ledger(ledger),
+            is_chk,
+            "is_checkpoint_ledger failed at ledger {ledger}"
+        );
+        assert_eq!(
+            checkpoint_floor(ledger),
+            exp_floor,
+            "checkpoint_floor failed at ledger {ledger}"
+        );
+        assert_eq!(
+            checkpoint_ceil(ledger),
+            exp_ceil,
+            "checkpoint_ceil failed at ledger {ledger}"
+        );
+    }
+}
